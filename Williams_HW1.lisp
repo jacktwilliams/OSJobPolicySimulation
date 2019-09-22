@@ -1,4 +1,4 @@
-(defvar dir "/home/jack/Storage/Nextcloud/School/OperatingSystems/")
+(defvar dir "/home/jack/dev/School/OSJobPolicySimulation/")
 (defstruct transfer-params sender receiver block speed)
 (defstruct holder name size allocated)
 (defvar *tape* (make-holder :name 'tape :size most-positive-fixnum :allocated 0))
@@ -12,22 +12,57 @@
 
 (defstruct job name exec-sequence)
 (defvar *jobs* (list))
+(defvar *job-size* 200)
+(defvar *inp-size* 100)
 
 (defstruct policy conditions actions)
-(defstruct transfer transfer-params start-time completion-time)
+(defstruct transfer transfer-params obj start-time)
 (defstruct interrupt time result)
-(defstruct context storage-jobs-table transfers interrupts)
+(defstruct context storage-jobs-table transfers interrupts time)
 
 (defun job-needs-input (job)
   (= 1 (mod (length (job-exec-sequence job))
             2)))
 
-(defun simple-run ()
-  (let* ((p-execute-job (make-policy :conditions (list (lambda (c) (let ((mem-jobs (cdr (assoc *memory* (context-storage-jobs-table c)))))
-                                                                     (and (job-p (first mem-jobs))
-                                                                          (job-needs-input (first mem-jobs))))))
-                                     :actions ))) ;policy-ex-job: if a job is in memory
-         )))
+(defun get-transfer-params (loc1 loc2)
+  (let ((n1 (holder-name loc1))
+        (n2 (holder-name loc2)))
+    (cond (((and (equal n1 'tape) (equal n2 'disk)) *tape->disk*)
+           ((and (equal n1 'disk) (equal n2 'memory)) *disk->memory*)
+           ((and (equal n1 'disk) (equal n2 'dma)) *disk->dma*)))))
+
+(defun get-time-for-transfer (params obj)
+  (let ((size (if (job-p obj) *job-size* *inp-size*))
+        (itrs (ceiling (/ size (transfer-params-block params)))))
+    (* itrs (transfer-params-time))))
+
+(defun move-with-result (context loc1 loc2 obj res)
+  (let ((transfer-params (get-transfer-params loc1 loc2))
+        (time (context-time context)))
+    (setf (context-transfers context) (cons (context-transfers context) (make-transfer :transfer params transfer-params
+                                                                                       :start-time time
+                                                                                       :obj obj)))
+    (setf (context-interrupts context) (cons (context-interrupts context) (make-interrupt :time (+ time (get-time-for-transfer transfer-params obj))
+                                                                                          :result (lambda ()))))))
+
+(defun job-in-location (context location)
+  (let ((loc-jobs (cdr (assoc location (context-storage-jobs-table context)))))
+    (= 1 (length loc-jobs))))
+
+(defun jobs-only-on-tape (context)
+  (dolist (location (map 'list #'car (context-storage-jobs-table context)))
+    (when (and (not (equal 'tape (holder-name location)))
+               (job-in-location context location))
+      (return-from jobs-only-on-tape nil)))
+  (return-from jobs-only-on-tape t))
+
+#+dev(defun simple-run ()
+  (let* ((p-move-job (make-policy :conditions (list jobs-only-on-tape)
+                                  :actions (list (lambda (c) ))
+	      #+dev(p-execute-job (make-policy :conditions (list (lambda (c) (let ((mem-jobs (cdr (assoc *memory* (context-storage-jobs-table c)))))
+									  (and (job-p (first mem-jobs))
+									       (job-needs-input (first mem-jobs))))))
+					  :actions )))))))
 
 (defun next-interrupt (context)
   "Find interrupt with next lowest time from INTERRUPTS and execute its result on CONTEXT."
@@ -51,7 +86,7 @@
 (defun run (jobs policies)
   (let* ((s-j-t (list (cons *tape* jobs) (cons *disk* nil) (cons *dma* nil) (cons *memory* nil) (cons *memory-input* nil))) ; all jobs start on tape
          (interrupts (list (make-interrupt :time 0 :result (lambda (c) )))) ; interrupt to trigger policy checks for initial actions
-         (context (make-context :storage-jobs-table s-j-t :transfers nil :interrupts interrupts)))
+         (context (make-context :storage-jobs-table s-j-t :transfers nil :interrupts interrupts :time 0)))
     (do ((interrupt (next-interrupt context) (next-interrupt context)))
         ((null interrupt) t)
       (setf (context-interrupts context) (remove interrupt (context-interrupts context))) ; remove the interrupt now that it has been processed.
@@ -115,3 +150,12 @@
                                                                                            (setf next-interrupt-set t)))))))
     (run nil (list pol1))
     (equal (funcall (second (policy-actions pol1)) t) t)))
+
+(defun int-jobs-only-on-tape-test (jobs)
+  "Tests jobs-only-on-tape and consequently job-in-location"
+  (let* ((s-j-t (list (cons *tape* jobs) (cons *disk* nil) (cons *dma* nil) (cons *memory* nil) (cons *memory-input* nil)))
+         (s-j-t-f (list (cons *tape* jobs) (cons *disk* (list (first jobs))) (cons *dma* nil) (cons *memory* nil) (cons *memory-input* nil)))
+         (context (make-context :storage-jobs-table s-j-t :transfers nil :interrupts nil))
+         (context-f (make-context :storage-jobs-table s-j-t-f :transfers nil :interrupts nil)))
+    (and (jobs-only-on-tape context)
+         (not (jobs-only-on-tape context-f)))))
