@@ -20,6 +20,9 @@
 (defstruct interrupt time result)
 (defstruct context storage-jobs-table transfers interrupts time)
 
+(defun timestamped-print (time str &optional (out t))
+  (format out "~a: ~a" time str))
+
 (defun job-needs-input (job)
   (= 1 (mod (length (job-exec-sequence job))
             2)))
@@ -27,23 +30,37 @@
 (defun get-transfer-params (loc1 loc2)
   (let ((n1 (holder-name loc1))
         (n2 (holder-name loc2)))
-    (cond (((and (equal n1 'tape) (equal n2 'disk)) *tape->disk*)
-           ((and (equal n1 'disk) (equal n2 'memory)) *disk->memory*)
-           ((and (equal n1 'disk) (equal n2 'dma)) *disk->dma*)))))
+    (cond ((and (equal n1 'tape) (equal n2 'disk)) *tape->disk*)
+          ((and (equal n1 'disk) (equal n2 'memory)) *disk->memory*)
+          ((and (equal n1 'disk) (equal n2 'dma)) *disk->dma*))))
 
 (defun get-time-for-transfer (params obj)
-  (let ((size (if (job-p obj) *job-size* *inp-size*))
+  (let* ((size (if (job-p obj) *job-size* *inp-size*))
         (itrs (ceiling (/ size (transfer-params-block params)))))
-    (* itrs (transfer-params-time))))
+    (* itrs (transfer-params-speed params))))
 
 (defun move-with-result (context loc1 loc2 obj res)
-  (let ((transfer-params (get-transfer-params loc1 loc2))
-        (time (context-time context)))
-    (setf (context-transfers context) (cons (context-transfers context) (make-transfer :transfer params transfer-params
-                                                                                       :start-time time
-                                                                                       :obj obj)))
-    (setf (context-interrupts context) (cons (context-interrupts context) (make-interrupt :time (+ time (get-time-for-transfer transfer-params obj))
-                                                                                          :result (lambda ()))))))
+  "Using CONTEXT, and locations LOC1 and LOC2, move OBJ from the first to the latter, running RES upon completion."
+  (let* ((transfer-params (get-transfer-params loc1 loc2))
+         (time (context-time context))
+         (transfer (make-transfer :transfer-params transfer-params
+                                  :start-time time
+                                  :obj obj))
+         (finish-time (+ time (get-time-for-transfer transfer-params obj)))
+         (result (lambda (context)
+                   (setf (context-time context) finish-time)
+                   (timestamped-print (context-time context) (with-output-to-string (outs)
+                                                               (format outs "Transfer from ~a to ~a completed"
+                                                                       (holder-name loc1) (holder-name loc2))))
+                   (setf (context-transfers context) (remove transfer (context-transfers context)))
+                   ;;remove job/input from loc1 and add to loc 2
+                   (rplacd (assoc loc1 (context-storage-jobs-table context)) (remove obj (assoc loc1 (context-storage-jobs-table context))))
+                   (rplacd (assoc loc2 (context-storage-jobs-table context)) (append (cdr (assoc loc2 (context-storage-jobs-table context))) (list obj)))
+                   (funcall res context))))
+    ;;todo: either print moving input or moving job-name
+    (timestamped-print time (with-output-to-string (outs) (format outs "Moving thing from ~a to ~a" (holder-name loc1) (holder-name loc2))))
+    (setf (context-transfers context) (append (context-transfers context) (list transfer)))
+    (setf (context-interrupts context) (append (context-interrupts context) (list (make-interrupt :time finish-time :result result))))))
 
 (defun job-in-location (context location)
   (let ((loc-jobs (cdr (assoc location (context-storage-jobs-table context)))))
@@ -159,3 +176,15 @@
          (context-f (make-context :storage-jobs-table s-j-t-f :transfers nil :interrupts nil)))
     (and (jobs-only-on-tape context)
          (not (jobs-only-on-tape context-f)))))
+
+(defun test-get-transfer-params ()
+  (equal *tape->disk* (get-transfer-params *tape* *disk*)))
+
+(defun int-move-with-result-test (jobs)
+  (let* ((s-j-t (list (cons *tape* jobs) (cons *disk* nil) (cons *dma* nil) (cons *memory* nil) (cons *memory-input* nil)))
+         (context (make-context :storage-jobs-table s-j-t :transfers nil :interrupts nil :time 0))
+         (flag nil))
+    (move-with-result context *tape* *disk* (first jobs) (lambda (c) (setf flag t)))
+    (next-interrupt context)
+    (and (job-in-location context *disk*)
+         (equal flag t))))
