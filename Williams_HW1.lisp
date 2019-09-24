@@ -24,8 +24,11 @@
   (format out "~a: ~a" time str))
 
 (defun job-needs-input (job)
-  (= 1 (mod (length (job-exec-sequence job))
+  (= 0 (mod (length (job-exec-sequence job))
             2)))
+
+(defun take-input-from-job (job)
+  (setf (job-exec-sequence job) (cdr (job-exec-sequence job))))
 
 (defun get-transfer-params (loc1 loc2)
   (let ((n1 (holder-name loc1))
@@ -39,6 +42,17 @@
         (itrs (ceiling (/ size (transfer-params-block params)))))
     (* itrs (transfer-params-speed params))))
 
+(defun remove-obj-from-location (context loc &optional (obj nil))
+  (let ((objs-in-location (assoc loc (context-storage-jobs-table context))))
+    (if (not (null obj))
+        (rplacd (assoc loc (context-storage-jobs-table context)) (remove obj objs-in-location))
+        (let ((removed-thing (first objs-in-location)))
+          (rplacd (assoc loc (context-storage-jobs-table context)) (remove removed-thing objs-in-location))
+          removed-thing))))
+
+(defun add-obj-to-location (context loc obj)
+  (rplacd (assoc loc (context-storage-jobs-table context)) (append (assoc loc (context-storage-jobs-table context)) (list obj))))
+
 (defun move-with-result (context loc1 loc2 obj res)
   "Using CONTEXT, and locations LOC1 and LOC2, move OBJ from the first to the latter, running RES upon completion."
   (let* ((transfer-params (get-transfer-params loc1 loc2))
@@ -47,24 +61,25 @@
                                   :start-time time
                                   :obj obj))
          (finish-time (+ time (get-time-for-transfer transfer-params obj)))
+         (obj-name (if (job-p obj) (job-name obj) "input"))
          (result (lambda (context)
                    (setf (context-time context) finish-time)
                    (timestamped-print (context-time context) (with-output-to-string (outs)
-                                                               (format outs "Transfer from ~a to ~a completed"
+                                                               (format outs "Transfer from ~a to ~a completed~%"
                                                                        (holder-name loc1) (holder-name loc2))))
                    (setf (context-transfers context) (remove transfer (context-transfers context)))
-                   ;;remove job/input from loc1 and add to loc 2
-                   (rplacd (assoc loc1 (context-storage-jobs-table context)) (remove obj (assoc loc1 (context-storage-jobs-table context))))
-                   (rplacd (assoc loc2 (context-storage-jobs-table context)) (append (cdr (assoc loc2 (context-storage-jobs-table context))) (list obj)))
-                   (funcall res context))))
-    ;;todo: either print moving input or moving job-name
-    (timestamped-print time (with-output-to-string (outs) (format outs "Moving thing from ~a to ~a" (holder-name loc1) (holder-name loc2))))
+                   (remove-obj-from-location context loc1 obj)
+                   (add-obj-to-location context loc2 obj)
+                   (when (not (null res)) (funcall res context)))))
+    (timestamped-print time (with-output-to-string (outs) (format outs "Moving ~a from ~a to ~a~%" obj-name (holder-name loc1) (holder-name loc2))))
     (setf (context-transfers context) (append (context-transfers context) (list transfer)))
-    (setf (context-interrupts context) (append (context-interrupts context) (list (make-interrupt :time finish-time :result result))))))
+    (setf (context-interrupts context) (append (context-interrupts context) (list (make-interrupt :time finish-time :result result))))))o
 
 (defun job-in-location (context location)
   (let ((loc-jobs (cdr (assoc location (context-storage-jobs-table context)))))
-    (= 1 (length loc-jobs))))
+    (if (= 1 (length loc-jobs))
+        (first loc-jobs)
+        nil)))
 
 (defun jobs-only-on-tape (context)
   (dolist (location (map 'list #'car (context-storage-jobs-table context)))
@@ -73,13 +88,39 @@
       (return-from jobs-only-on-tape nil)))
   (return-from jobs-only-on-tape t))
 
-#+dev(defun simple-run ()
-  (let* ((p-move-job (make-policy :conditions (list jobs-only-on-tape)
-                                  :actions (list (lambda (c) ))
-	      #+dev(p-execute-job (make-policy :conditions (list (lambda (c) (let ((mem-jobs (cdr (assoc *memory* (context-storage-jobs-table c)))))
-									  (and (job-p (first mem-jobs))
-									       (job-needs-input (first mem-jobs))))))
-					  :actions )))))))
+(defun run-job (context)
+  (let* ((job (remove-obj-from-location context *memory*))
+         (run-time (first (job-exec-sequence job))))
+    (if (job-needs-input job)
+        (error "~a needs input" job)
+        (take-input-from-job job)) ;; function blindly removes first item -- including cpu exec bursts
+    (setf (context-interrupts context) (append (context-interrupts context) (list (make-interrupt :time (+ run-time (context-time context))
+                                                                                                  :result (lambda (c)
+                                                                                                            )))))))
+
+(defun simple-run ()
+  (let* ((p-move-job (make-policy :conditions (list #'jobs-only-on-tape)
+                                  :actions (list (lambda (c)
+                                                   (let ((job (cadr (assoc *tape* (context-storage-jobs-table c)))))
+                                                     (move-with-result c *tape* *disk* job
+                                                                       (lambda (c)
+                                                                         (move-with-result c *disk* *memory* job nil))))))))
+         (p-job-needs-input (make-policy :conditions (list (lambda (c)
+                                                             (let ((job (job-in-location c *memory*)))
+                                                               (and (not (null job))
+                                                                    (job-needs-input job)))))
+                                         :actions (list (lambda (c)
+                                                          (take-input-from-job (job-in-location c *memory*))
+                                                          (move-with-result c *tape* *disk* "input"
+                                                                            (lambda (c)
+                                                                              (move-with-result c *disk* *memory* "input" nil)))))))
+         (p-run-job (make-policy :conditions (list (lambda (c)
+                                                     (let ((job (job-in-location c *memory*)))
+                                                       (and (not (null job))
+                                                            (not (job-needs-input job))))))
+                                 :actions (list (lambda (c)
+                                                  (run-job c))))))
+    (run *jobs* (list p-move-job p-job-needs-input p-run-job))))
 
 (defun next-interrupt (context)
   "Find interrupt with next lowest time from INTERRUPTS and execute its result on CONTEXT."
@@ -88,7 +129,8 @@
       (when (< (interrupt-time interrupt) time)
         (setf time (interrupt-time interrupt))
         (setf next interrupt)))
-    (when (not (null next))
+    (when (and (not (null next))
+               (not (null (interrupt-result next))))
       (funcall (interrupt-result next) context))
     (return-from next-interrupt next)))
 
