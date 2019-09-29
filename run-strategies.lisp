@@ -26,7 +26,7 @@
                                                             (move-with-result *tape* *disk* "input"
                                                                               (lambda ()
                                                                                 (move-with-result *disk* *memory-input* "input" (lambda ()
-                                                                                                                                  (consume-input-or-cpu-time job))))))))))
+                                                                                                                                  (consume-input job))))))))))
          (p-run-job (make-policy :conditions (list #'job-should-run-cond)
                                  :actions (list #'run-job))))
     (run *jobs* (list p-move-job p-job-needs-input p-run-job))))

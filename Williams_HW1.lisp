@@ -10,7 +10,7 @@
 (defvar *disk->dma*)
 (defvar *dma*)
 
-(defstruct job name exec-sequence)
+(defstruct job name bursts inputs)
 (defvar *jobs* (list))
 (defvar *job-size* 200)
 (defvar *inp-size* 100)
@@ -30,15 +30,20 @@
   (format out "~a: ~a~%" time str))
 
 (defun job-needs-input (job)
-  (let ((exec-seq (job-exec-sequence job)))
-    (and (not (= 0 (length exec-seq)))
-         (= 0 (mod (length (job-exec-sequence job))
-                   2)))))
+  (let ((bursts (job-bursts job))
+        (inputs (job-inputs job)))
+    (and (not (= 0 (length inputs)))
+         (= (length bursts) (length inputs)))))
 
 (defun take-input-from-job (job)
-  "Shorten JOB's exec-sequence and return the altered job."
+  "Shorten JOB's input list and return the altered job."
   (let ((job (copy-job job))) ;; don't want the setf to change the job in the *jobs*
-    (setf (job-exec-sequence job) (cdr (job-exec-sequence job)))
+    (setf (job-inputs job) (cdr (job-inputs job)))
+    job))
+
+(defun take-burst-from-job (job)
+  (let ((job (copy-job job)))
+    (setf (job-bursts job) (cdr (job-bursts job)))
     job))
 
 (defun get-transfer-params (loc1 loc2)
@@ -70,15 +75,28 @@
     (rplacd (assoc loc s-j-t) new-loc-jobs)
     (setf (context-storage-jobs-table *context*) s-j-t)))
 
-(defun consume-input-or-cpu-time (job)
-  "Pop the first item off the JOB's exec-sequence, knowing the job is in memory."
+(defun consume-burst (job)
+  "Pop the first item off the JOB's burst list, knowing the job is in memory."
   (remove-obj-from-location *memory* job)
   (when (not (null (job-in-location *memory*))) ;;sanity check
     (error "Job should've been removed."))
-  (let ((new-job (take-input-from-job job)))
-    (if (= 0 (length (job-exec-sequence new-job)))
+  (when (= 0 (length (job-bursts job)))
+    (error "No bursts left."))
+  (let ((new-job (take-burst-from-job job)))
+    (if (= 0 (length (job-bursts new-job)))
         (timestamped-print (context-time *context*) (concatenate 'string (job-name job) " finished."))
         (add-obj-to-location *memory* new-job))))
+
+(defun consume-input (job)
+  "Pop the first item off the JOB's input list list, knowing the job is in memory."
+  (remove-obj-from-location *memory* job)
+  (when (not (null (job-in-location *memory*))) ;;sanity check
+    (error "Job should've been removed."))
+  (when (= 0 (length (job-inputs job)))
+    (error "No inputs left."))
+  (let ((new-job (take-input-from-job job)))
+    (add-obj-to-location *memory* new-job)))
+
 
 (defun move-with-result (loc1 loc2 obj res)
   "Using CONTEXT, and locations LOC1 and LOC2, move OBJ from the first to the latter, running RES upon completion."
@@ -118,7 +136,7 @@
 (defun run-job ()
   "Knowing a job is in memory, execute it. This entails proper logging and removing the cpu burst from the job's exec-sequence."
   (let* ((job (remove-obj-from-location *memory*))
-         (run-time (first (job-exec-sequence job))))
+         (run-time (first (job-bursts job))))
     (when (job-needs-input job)
       (error "~a needs input" job))
     (timestamped-print (context-time *context*) (concatenate 'string "Start executing " (job-name job)))
@@ -126,7 +144,7 @@
     (setf (context-interrupts *context*) (append (context-interrupts *context*) (list (make-interrupt :time (+ run-time (context-time *context*))
                                                                                                       :result (lambda ()
                                                                                                                 (timestamped-print (context-time *context*) (concatenate 'string "Done executing " (job-name job)))
-                                                                                                                (consume-input-or-cpu-time job))))))))
+                                                                                                                (consume-burst job))))))))
 
 (defun next-interrupt ()
   "Find interrupt with next lowest time. Execute the interrupt's result and set the context time accordingly."
@@ -176,11 +194,14 @@
         ((null line) t)
       (with-input-from-string (job line)
         (let ((name (symbol-name (read job)))
-              (exec-sequence '()))
+              (bursts (list))
+              (inputs (list)))
           (do ((num (read job nil nil) (read job nil nil)))
               ((null num) t)
-            (setf exec-sequence (append exec-sequence (list num))))
-          (setf *jobs* (append *jobs* (list (make-job :name name :exec-sequence exec-sequence))))))))
+            (if (< (length inputs) (length bursts))
+                (setf inputs (append inputs (list num)))
+                (setf bursts (append bursts (list num)))))
+          (setf *jobs* (append *jobs* (list (make-job :name name :inputs inputs :bursts bursts))))))))
 
   (with-open-file (in-file (concatenate 'string dir "test1.dat"))
     (setf *tape->disk* (make-transfer-params
