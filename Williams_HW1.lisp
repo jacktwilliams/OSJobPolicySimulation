@@ -128,39 +128,6 @@
                                                                                                                 (timestamped-print (context-time *context*) (concatenate 'string "Done executing " (job-name job)))
                                                                                                                 (consume-input-or-cpu-time job))))))))
 
-(defun job-needs-input-cond ()
-  (let ((job (job-in-location *memory*)))
-    (and (not (null job))
-         (job-needs-input job)
-         (every (lambda (transfer) (not (equal (transfer-obj transfer) "input"))) (context-transfers *context*)))))
-
-(defun job-should-run-cond ()
-  (let ((job (job-in-location *memory*)))
-    (and (not (null job))
-         (not (job-needs-input job)))))
-
-(defun simple-run ()
-  (let* ((p-move-job (make-policy :conditions (list #'jobs-only-on-tape
-                                                    (lambda ()
-                                                      (let ((job (job-in-location *tape*)))
-                                                        (and (not (null job))
-                                                             (job-p job)))))
-                                  :actions (list (lambda ()
-                                                   (let ((job (cadr (assoc *tape* (context-storage-jobs-table *context*)))))
-                                                     (move-with-result *tape* *disk* job
-                                                                       (lambda ()
-                                                                         (move-with-result *disk* *memory* job nil))))))))
-         (p-job-needs-input (make-policy :conditions (list #'job-needs-input-cond)
-                                         :actions (list (lambda ()
-                                                          (let ((job (job-in-location *memory*)))
-                                                            (move-with-result *tape* *disk* "input"
-                                                                              (lambda ()
-                                                                                (move-with-result *disk* *memory-input* "input" (lambda ()
-                                                                                                                                  (consume-input-or-cpu-time job))))))))))
-         (p-run-job (make-policy :conditions (list #'job-should-run-cond)
-                                 :actions (list #'run-job))))
-    (run *jobs* (list p-move-job p-job-needs-input p-run-job))))
-
 (defun next-interrupt ()
   "Find interrupt with next lowest time. Execute the interrupt's result and set the context time accordingly."
   (let ((interrupts (context-interrupts *context*))
@@ -175,7 +142,6 @@
       (when (not (null (interrupt-result next)))
         (funcall (interrupt-result next))))
     (return-from next-interrupt next)))
-
 
 (defun every-policy-condition (policy)
   "Does every condition of the policy hold?"
@@ -235,59 +201,5 @@
     (setf *dma* (make-holder :name 'dma :size (read in-file) :allocated 0))
     (read-jobs in-file)))
 
-
-(defun test-next-interrupt ()
-  (let* ((interrupts (list (make-interrupt :time 10 :result (lambda () (print "hey")))
-                           (make-interrupt :time 20 :result (lambda () (print "hey")))))
-         (*context* (make-context :storage-jobs-table nil :transfers nil :interrupts interrupts))
-         (res-time (interrupt-time (next-interrupt)))
-         (*context* (make-context :interrupts (list)))
-         (res1 (next-interrupt))
-         (res (and (= res-time 10) (null res1))))
-    (print res-time)
-    (print res)
-    res))
-
-(defun int-run-test ()
-  "Tests evaluation of policies. Tests the integration with next-interrupt by having actions that sets more interrupts."
-  (let* ((flag nil)
-         (next-interrupt-set nil)
-         (pol1 (make-policy :conditions (list (lambda () t)) :actions (list (lambda () (print "action"))
-                                                                            (lambda () (if (not (null flag)) flag (setf flag t)))
-                                                                            (lambda () (when (null next-interrupt-set)
-                                                                                         (setf (context-interrupts *context*) (list (make-interrupt :time 10 :result (lambda () (print "interrupt processed")))))
-                                                                                         (setf next-interrupt-set t)))))))
-    (run nil (list pol1))
-    (equal (funcall (second (policy-actions pol1))) t)))
-
-(defun int-jobs-only-on-tape-test (jobs)
-  "Tests jobs-only-on-tape and consequently job-in-location"
-  (let* ((s-j-t (list (cons *tape* jobs) (cons *disk* nil) (cons *dma* nil) (cons *memory* nil) (cons *memory-input* nil)))
-         (s-j-t-f (list (cons *tape* jobs) (cons *disk* (list (first jobs))) (cons *dma* nil) (cons *memory* nil) (cons *memory-input* nil)))
-         (*context* (make-context :storage-jobs-table s-j-t :transfers nil :interrupts nil))
-         (test1 (jobs-only-on-tape))
-         (*context* (make-context :storage-jobs-table s-j-t-f :transfers nil :interrupts nil))
-         (test2 (jobs-only-on-tape)))
-    (and test1 (not test2))))
-
-(defun test-get-transfer-params ()
-  (equal *tape->disk* (get-transfer-params *tape* *disk*)))
-
-(defun int-move-with-result-test (jobs)
-  (let* ((s-j-t (list (cons *tape* jobs) (cons *disk* nil) (cons *dma* nil) (cons *memory* nil) (cons *memory-input* nil)))
-         (*context* (make-context :storage-jobs-table s-j-t :transfers nil :interrupts nil :time 0))
-         (flag nil))
-    (move-with-result *tape* *disk* (first jobs) (lambda () (setf flag t)))
-    (next-interrupt)
-    (format t "Job on disk? ~a~%Flag? ~a" (job-in-location *disk*) flag)
-    (and (job-in-location *disk*)
-         (equal flag t))))
-
-(defun int-consume-input-or-cpu-time-test (jobs)
-  (let* ((job (copy-job (first jobs)))
-         (s-j-t (list (cons *tape* nil) (cons *disk* nil) (cons *dma* nil) (cons *memory* (list job)) (cons *memory-input* nil)))
-         (*context* (make-context :storage-jobs-table s-j-t :transfers nil :interrupts nil :time 0)))
-    (dotimes (i (length (job-exec-sequence (job-in-location *memory*))) t)
-      (let ((job1 (job-in-location *memory*)))
-        (consume-input-or-cpu-time job1)))
-    (null (job-in-location *memory*))))
+;(load (concatenate 'string dir "testing.lisp"))
+(load (concatenate 'string dir "run-strategies.lisp"))

@@ -1,0 +1,32 @@
+(defun job-needs-input-cond ()
+  (let ((job (job-in-location *memory*)))
+    (and (not (null job))
+         (job-needs-input job)
+         (every (lambda (transfer) (not (equal (transfer-obj transfer) "input"))) (context-transfers *context*)))))
+
+(defun job-should-run-cond ()
+  (let ((job (job-in-location *memory*)))
+    (and (not (null job))
+         (not (job-needs-input job)))))
+
+(defun simple-run ()
+  (let* ((p-move-job (make-policy :conditions (list #'jobs-only-on-tape
+                                                    (lambda ()
+                                                      (let ((job (job-in-location *tape*)))
+                                                        (and (not (null job))
+                                                             (job-p job)))))
+                                  :actions (list (lambda ()
+                                                   (let ((job (cadr (assoc *tape* (context-storage-jobs-table *context*)))))
+                                                     (move-with-result *tape* *disk* job
+                                                                       (lambda ()
+                                                                         (move-with-result *disk* *memory* job nil))))))))
+         (p-job-needs-input (make-policy :conditions (list #'job-needs-input-cond)
+                                         :actions (list (lambda ()
+                                                          (let ((job (job-in-location *memory*)))
+                                                            (move-with-result *tape* *disk* "input"
+                                                                              (lambda ()
+                                                                                (move-with-result *disk* *memory-input* "input" (lambda ()
+                                                                                                                                  (consume-input-or-cpu-time job))))))))))
+         (p-run-job (make-policy :conditions (list #'job-should-run-cond)
+                                 :actions (list #'run-job))))
+    (run *jobs* (list p-move-job p-job-needs-input p-run-job))))
